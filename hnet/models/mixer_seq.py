@@ -24,7 +24,7 @@ class CausalLMOutput:
 
 
 def cross_entropy(
-    logits: torch.Tensor, y: torch.LongTensor, ignore_index: int = -100
+    logits: torch.Tensor, labels: torch.LongTensor, pad_token_id: int = -100
 ) -> torch.FloatTensor:
     """Cross entropy loss.
     Inputs:
@@ -33,15 +33,15 @@ def cross_entropy(
         ignore_index: int
     """
     logits = logits.view(-1, logits.shape[-1])  # [batch*seq_len, vocab_size]
-    y = y.view(-1)  # [batch*seq_len]
-    return F.cross_entropy(logits, y, ignore_index=ignore_index)  # [1]
+    y = labels.view(-1)  # [batch*seq_len]
+    return F.cross_entropy(logits, y, ignore_index=pad_token_id)  # [1]
 
 
 def weighted_cross_entropy(
     logits: torch.FloatTensor,
-    y: torch.LongTensor,
+    labels: torch.LongTensor,
     loss_weights: torch.FloatTensor,
-    ignore_index: int = -100,
+    pad_token_id: int = -100,
 ) -> torch.FloatTensor:
     """Weighted cross entropy loss (discounts certain tokens, e.g., repeated base pairs in genome).
     Inputs:
@@ -51,12 +51,12 @@ def weighted_cross_entropy(
         ignore_index: int
     """
     logits = logits.view(-1, logits.shape[-1])  # [batch * seq_len, vocab_size]
-    y = y.view(-1)  # [batch*seq_len]
+    y = labels.view(-1)  # [batch*seq_len]
     ce = F.cross_entropy(
-        logits, y, ignore_index=ignore_index, reduction="none"
+        logits, y, ignore_index=pad_token_id, reduction="none"
     )  # [batch, seq_len]
     loss_weights = loss_weights.view(-1)  # [batch*seq_len]
-    loss_weights[y == ignore_index] = 0.0
+    loss_weights[y == pad_token_id] = 0.0
     # TODO: Follows GPN implementation, but should we remove weight normalization?
     return (ce * (loss_weights / loss_weights.sum())).sum()  # [1]
 
