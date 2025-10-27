@@ -145,6 +145,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
             "Position ids are not supported for HNet due to the subsampling hierarchical structure"
         )
 
+        # TODO: Ask June appouting packing (we can assume all seqs same length and therefore packing during training), do we need to do anything else?
         if mask is None:
             # Absent a mask, we assume we are running in packed mode
             assert inference_params is None, (
@@ -195,27 +196,31 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
                 ratio_loss_sum = 0.0
                 for bpred_stage in bpred_output:
                     # Calculate the ratio_loss for each stage
-                    boundary_mask = bpred_stage.boundary_mask  #  [seq_len]
-                    boundary_probs = bpred_stage.boundary_prob  # [seq_len, 2]
-                    boundary_probs = boundary_probs[:, 1]  # [seq_len]
-                    f_loss = torch.mean(boundary_mask, dim=-1)
-                    g_loss = torch.mean(boundary_probs, dim=-1)
+                    # NOTE: bpred outputs are flattened into [B*seq_len] instead of [B, seq_len] (probably due to packing?), is this ok?
+                    boundary_mask = bpred_stage.boundary_mask  #  [B * seq_len]
+                    boundary_probs = bpred_stage.boundary_prob  # [B * seq_len, 2]
+                    boundary_probs = boundary_probs[:, 1]  # [B *seq_len]
+                    boundary_mask = boundary_mask.reshape(B, L)  # [B, seq_len]
+                    boundary_probs = boundary_probs.reshape(B, L)  # [B, seq_len]
+                    # NOTE: We compute loss for each batch and take the batch mean, is this correct?
+                    f_loss = torch.sum(boundary_mask, dim=-1) * (1 / L)  # [B]
+                    g_loss = torch.sum(boundary_probs, dim=-1) * (1 / L)  # [B]
                     stage_ratio_loss = (target_ratio / (target_ratio - 1)) * (
                         (target_ratio - 1) * f_loss * g_loss
                         + (1 - f_loss) * (1 - g_loss)
-                    )
-                    ratio_loss_sum += stage_ratio_loss
+                    )  # [B]
+                    ratio_loss_sum += stage_ratio_loss.mean()
                 # L = L_ar + \alpha * \sum_{stages} {L_ratio}
                 loss += self.config.ratio_loss_weight * ratio_loss_sum
 
         CausalLMOutput = namedtuple(
-            "CausalLMOutput", ["logits", "bpred_output", "inference_params", "loss"]
+            "CausalLMOutput", ["loss", "logits", "bpred_output", "inference_params"]
         )
         return CausalLMOutput(
+            loss=loss,
             logits=lm_logits,
             bpred_output=bpred_output,
             inference_params=inference_params,
-            loss=loss,
         )
 
     def step(self, input_ids, inference_params):
