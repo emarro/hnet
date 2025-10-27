@@ -1,6 +1,7 @@
 from dataclasses import asdict
 
 import torch
+from omegaconf import OmegaConf
 
 
 def get_seq_idx(cu_seqlens, device=None):
@@ -12,8 +13,13 @@ def get_seq_idx(cu_seqlens, device=None):
 
 
 def get_stage_cfg(cfg, stage_idx):
+    def dictify(cfg):
+        if OmegaConf.is_dict(cfg):
+            return OmegaConf.to_container(cfg, resolve=True)
+        return asdict(cfg)
+
     return {
-        k: v[stage_idx] if isinstance(v, list) else v for k, v in asdict(cfg).items()
+        k: v[stage_idx] if isinstance(v, list) else v for k, v in dictify(cfg).items()
     }
 
 
