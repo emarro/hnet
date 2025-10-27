@@ -196,7 +196,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
                 for bpred_stage in bpred_output:
                     # Calculate the ratio_loss for each stage
                     boundary_mask = bpred_stage.boundary_mask  #  [seq_len]
-                    boundary_probs = bpred_stage.boundary_probs  # [seq_len, 2]
+                    boundary_probs = bpred_stage.boundary_prob  # [seq_len, 2]
                     boundary_probs = boundary_probs[:, 1]  # [seq_len]
                     f_loss = torch.mean(boundary_mask, dim=-1)
                     g_loss = torch.mean(boundary_probs, dim=-1)
