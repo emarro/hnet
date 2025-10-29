@@ -176,6 +176,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
         lm_logits = self.lm_head(hidden_states)
         loss = None
         ar_loss = None
+        ratio_loss_sum = None
         if labels is not None:
             # Standard AR loss (or weighted version of ar loss)
             if loss_weights is not None:
