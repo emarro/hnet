@@ -21,6 +21,8 @@ class CausalLMOutput:
     bpred_output: list[RoutingModuleOutput]
     inference_params: HNetState
     loss: torch.FloatTensor
+    ar_loss: torch.FloatTensor
+    ratio_loss: torch.FloatTensor
 
 
 def cross_entropy(
@@ -209,18 +211,29 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
                         (target_ratio - 1) * f_loss * g_loss
                         + (1 - f_loss) * (1 - g_loss)
                     )  # [B]
-                    ratio_loss_sum += stage_ratio_loss.mean()
+                    ratio_loss_sum += stage_ratio_loss.mean()  # [1]
                 # L = L_ar + \alpha * \sum_{stages} {L_ratio}
                 loss += self.config.ratio_loss_weight * ratio_loss_sum
+                # TODO: Return AR loss and L_ratio loss individually to allow for easier debugging
 
         CausalLMOutput = namedtuple(
-            "CausalLMOutput", ["loss", "logits", "bpred_output", "inference_params"]
+            "CausalLMOutput",
+            [
+                "loss",
+                "logits",
+                "bpred_output",
+                "inference_params",
+                "ar_loss",
+                "ratio_loss",
+            ],
         )
         return CausalLMOutput(
             loss=loss,
             logits=lm_logits,
             bpred_output=bpred_output,
             inference_params=inference_params,
+            ar_loss=ar_loss,
+            ratio_loss=ratio_loss_sum,
         )
 
     def step(self, input_ids, inference_params):
