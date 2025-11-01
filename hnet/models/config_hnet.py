@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Union
+from transformers import PretrainedConfig
 
 
 @dataclass
@@ -18,7 +19,7 @@ class SSMConfig:
 
 
 @dataclass
-class HNetConfig:
+class HNetConfig(PretrainedConfig):
     arch_layout: List[Union[str, List]] = field(default_factory=list)
     d_model: List[int] = field(default_factory=list)
     # intermediate dimension for the FFNs (0 indicates no FFN)
