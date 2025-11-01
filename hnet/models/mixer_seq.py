@@ -56,7 +56,7 @@ def weighted_cross_entropy(
     y = labels.view(-1)  # [batch*seq_len]
     ce = F.cross_entropy(
         logits, y, ignore_index=pad_token_id, reduction="none"
-    )  # [batch, seq_len]
+    )  # [batch * seq_len]
     loss_weights = loss_weights.view(-1)  # [batch*seq_len]
     loss_weights[y == pad_token_id] = 0.0
     # TODO: Follows GPN implementation, but should we remove weight normalization?
@@ -193,29 +193,31 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
                     pad_token_id=self.config.pad_token_id,
                 )
             loss = ar_loss
-            # TODO: Ask June for help checking below
-            # TODO: target_ratio should probably be a list (allow diff ratio per stage), currently fixed
+            # TODO: target_ratio should be a list (allow diff ratio per stage), currently fixed
             if target_ratio is not None:
                 ratio_loss_sum = 0.0
                 for bpred_stage in bpred_output:
                     # Calculate the ratio_loss for each stage
-                    # NOTE: bpred outputs are flattened into [B*seq_len] instead of [B, seq_len] (probably due to packing?), is this ok?
                     boundary_mask = bpred_stage.boundary_mask  #  [B * seq_len]
                     boundary_probs = bpred_stage.boundary_prob  # [B * seq_len, 2]
                     boundary_probs = boundary_probs[:, 1]  # [B *seq_len]
-                    boundary_mask = boundary_mask.reshape(B, L)  # [B, seq_len]
-                    boundary_probs = boundary_probs.reshape(B, L)  # [B, seq_len]
-                    # NOTE: We compute loss for each batch and take the batch mean, is this correct?
-                    f_loss = torch.sum(boundary_mask, dim=-1) * (1 / L)  # [B]
-                    g_loss = torch.sum(boundary_probs, dim=-1) * (1 / L)  # [B]
+
+                    # NOTE: According to June we should flatten instead of taking the batchmean. No real effect on DNA (where L is constant)
+                    # Leaving old logic for possible future exprimentation with varying target_ratio per batch
+                    # boundary_mask = boundary_mask.reshape(B, L)  # [B, seq_len]
+                    # boundary_probs = boundary_probs.reshape(B, L)  # [B, seq_len]
+                    # f_loss = torch.sum(boundary_mask, dim=-1) * (1 / L)  # [1]
+                    # g_loss = torch.sum(boundary_probs, dim=-1) * (1 / L)  # [1]
+                    f_loss = torch.mean(boundary_mask, dim=-1)  # [1]
+                    g_loss = torch.mean(boundary_probs, dim=-1)  # [1]
+
                     stage_ratio_loss = (target_ratio / (target_ratio - 1)) * (
                         (target_ratio - 1) * f_loss * g_loss
                         + (1 - f_loss) * (1 - g_loss)
-                    )  # [B]
+                    )  # [1]
                     ratio_loss_sum += stage_ratio_loss.mean()  # [1]
                 # L = L_ar + \alpha * \sum_{stages} {L_ratio}
-                loss += self.config.ratio_loss_weight * ratio_loss_sum
-                # TODO: Return AR loss and L_ratio loss individually to allow for easier debugging
+                loss = ar_loss + (self.config.ratio_loss_weight * ratio_loss_sum)
 
         CausalLMOutput = namedtuple(
             "CausalLMOutput",
