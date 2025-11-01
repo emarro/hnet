@@ -11,6 +11,9 @@ class ByteTokenizer:
     def __len__(self):
         return self.vocab_size
 
+    def __call__(self, *args, **kwargs):
+        return self.encode(*args, **kwargs)
+
     def encode(
         self, seqs: list[str], add_bos: bool = False, add_eos: bool = False, **kwargs
     ) -> list[dict[str, np.ndarray]]:
