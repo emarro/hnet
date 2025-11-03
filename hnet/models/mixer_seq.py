@@ -146,7 +146,6 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
         assert position_ids is None, (
             "Position ids are not supported for HNet due to the subsampling hierarchical structure"
         )
-
         # TODO: Ask June appouting packing (we can assume all seqs same length and therefore packing during training), do we need to do anything else?
         if mask is None:
             # Absent a mask, we assume we are running in packed mode
@@ -208,7 +207,10 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
                     # boundary_probs = boundary_probs.reshape(B, L)  # [B, seq_len]
                     # f_loss = torch.sum(boundary_mask, dim=-1) * (1 / L)  # [1]
                     # g_loss = torch.sum(boundary_probs, dim=-1) * (1 / L)  # [1]
-                    f_loss = torch.mean(boundary_mask, dim=-1)  # [1]
+                    # cast boundary mask to same dypte as boundary_probs (mean doesn't work with bool types)
+                    f_loss = torch.mean(
+                        boundary_mask.to(boundary_probs.dtype), dim=-1
+                    )  # [1]
                     g_loss = torch.mean(boundary_probs, dim=-1)  # [1]
 
                     stage_ratio_loss = (target_ratio / (target_ratio - 1)) * (

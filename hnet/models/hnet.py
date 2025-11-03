@@ -13,7 +13,7 @@ from hnet.modules.dc import (
     DeChunkState,
 )
 from hnet.modules.utils import apply_optimization_params
-from omegaconfg import OmegaConf
+from omegaconf import OmegaConf
 
 from .config_hnet import HNetConfig
 
