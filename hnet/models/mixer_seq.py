@@ -1,8 +1,10 @@
 from collections import namedtuple
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from flash_attn.utils.generation import GenerationMixin
 
@@ -12,11 +14,53 @@ from .config_hnet import HNetConfig
 from hnet.modules.dc import RoutingModuleOutput
 from hnet.modules.utils import apply_optimization_params
 
+
 @dataclass
 class CausalLMOutput:
     logits: torch.Tensor
     bpred_output: list[RoutingModuleOutput]
     inference_params: HNetState
+    loss: torch.FloatTensor
+    ar_loss: torch.FloatTensor
+    ratio_loss: torch.FloatTensor
+
+
+def cross_entropy(
+    logits: torch.Tensor, labels: torch.LongTensor, pad_token_id: int = -100
+) -> torch.FloatTensor:
+    """Cross entropy loss.
+    Inputs:
+        logits: torch.FloatTensor [batch, seq_len, vocab_size
+        y: torch.LongTensor [batch, seq_len]
+        ignore_index: int
+    """
+    logits = logits.view(-1, logits.shape[-1])  # [batch*seq_len, vocab_size]
+    y = labels.view(-1)  # [batch*seq_len]
+    return F.cross_entropy(logits, y, ignore_index=pad_token_id)  # [1]
+
+
+def weighted_cross_entropy(
+    logits: torch.FloatTensor,
+    labels: torch.LongTensor,
+    loss_weights: torch.FloatTensor,
+    pad_token_id: int = -100,
+) -> torch.FloatTensor:
+    """Weighted cross entropy loss (discounts certain tokens, e.g., repeated base pairs in genome).
+    Inputs:
+        logits: torch.FloatTensor [batch, seq_len, vocab_size
+        y: torch.LongTensor [batch, seq_len]
+        loss_weights: torch.FloatTensor [batch, seq_len]
+        ignore_index: int
+    """
+    logits = logits.view(-1, logits.shape[-1])  # [batch * seq_len, vocab_size]
+    y = labels.view(-1)  # [batch*seq_len]
+    ce = F.cross_entropy(
+        logits, y, ignore_index=pad_token_id, reduction="none"
+    )  # [batch * seq_len]
+    loss_weights = loss_weights.view(-1)  # [batch*seq_len]
+    loss_weights[y == pad_token_id] = 0.0
+    # TODO: Follows GPN implementation, but should we remove weight normalization?
+    return (ce * (loss_weights / loss_weights.sum())).sum()  # [1]
 
 
 class HNetForCausalLM(nn.Module, GenerationMixin):
@@ -51,7 +95,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
     def tie_weights(self):
         if self.config.tie_embeddings:
             self.lm_head.weight = self.embeddings.weight
-    
+
     def init_weights(self, initializer_range: float = 0.02) -> None:
         """
         Initializes the weights of the model.
@@ -82,13 +126,16 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
 
     def forward(
         self,
-        input_ids,
-        mask=None,
-        position_ids=None,
-        inference_params=None,
-        num_last_tokens=0,
+        input_ids: torch.LongTensor,
+        labels: Optional[torch.LongTensor] = None,
+        loss_weights: Optional[torch.FloatTensor] = None,
+        target_ratio: Optional[torch.FloatTensor] = None,
+        mask: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        inference_params: Optional[dict] = None,
+        num_last_tokens: Optional[int] = 0,
         **mixer_kwargs,
-    ):
+    ) -> CausalLMOutput:
         """
         num_last_tokens: if > 0, only return the logits for the last n tokens
         """
@@ -96,15 +143,15 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
 
         B, L, D = hidden_states.shape
 
-        assert (
-            position_ids is None
-        ), "Position ids are not supported for HNet due to the subsampling hierarchical structure"
-
+        assert position_ids is None, (
+            "Position ids are not supported for HNet due to the subsampling hierarchical structure"
+        )
+        # TODO: Ask June appouting packing (we can assume all seqs same length and therefore packing during training), do we need to do anything else?
         if mask is None:
             # Absent a mask, we assume we are running in packed mode
-            assert (
-                inference_params is None
-            ), "Inference params are not supported in packed mode"
+            assert inference_params is None, (
+                "Inference params are not supported in packed mode"
+            )
             hidden_states = hidden_states.flatten(0, 1)
             cu_seqlens = torch.arange(B + 1, device=hidden_states.device) * L
             max_seqlen = torch.tensor(L, dtype=torch.int, device=hidden_states.device)
@@ -126,21 +173,79 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
         lm_logits = self.lm_head(hidden_states)
+        loss = None
+        ar_loss = None
+        ratio_loss_sum = None
+        if labels is not None:
+            # Standard AR loss (or weighted version of ar loss)
+            if loss_weights is not None:
+                ar_loss = weighted_cross_entropy(
+                    logits=lm_logits,
+                    labels=labels,
+                    loss_weights=loss_weights,
+                    pad_token_id=self.config.pad_token_id,
+                )
+            else:
+                ar_loss = cross_entropy(
+                    logits=lm_logits,
+                    labels=labels,
+                    pad_token_id=self.config.pad_token_id,
+                )
+            loss = ar_loss
+            # TODO: target_ratio should be a list (allow diff ratio per stage), currently fixed
+            if target_ratio is not None:
+                ratio_loss_sum = 0.0
+                for bpred_stage in bpred_output:
+                    # Calculate the ratio_loss for each stage
+                    boundary_mask = bpred_stage.boundary_mask  #  [B * seq_len]
+                    boundary_probs = bpred_stage.boundary_prob  # [B * seq_len, 2]
+                    boundary_probs = boundary_probs[:, 1]  # [B *seq_len]
+
+                    # NOTE: According to June we should flatten instead of taking the batchmean. No real effect on DNA (where L is constant)
+                    # Leaving old logic for possible future exprimentation with varying target_ratio per batch
+                    # boundary_mask = boundary_mask.reshape(B, L)  # [B, seq_len]
+                    # boundary_probs = boundary_probs.reshape(B, L)  # [B, seq_len]
+                    # f_loss = torch.sum(boundary_mask, dim=-1) * (1 / L)  # [1]
+                    # g_loss = torch.sum(boundary_probs, dim=-1) * (1 / L)  # [1]
+                    # cast boundary mask to same dypte as boundary_probs (mean doesn't work with bool types)
+                    f_loss = torch.mean(
+                        boundary_mask.to(boundary_probs.dtype), dim=-1
+                    )  # [1]
+                    g_loss = torch.mean(boundary_probs, dim=-1)  # [1]
+
+                    stage_ratio_loss = (target_ratio / (target_ratio - 1)) * (
+                        (target_ratio - 1) * f_loss * g_loss
+                        + (1 - f_loss) * (1 - g_loss)
+                    )  # [1]
+                    ratio_loss_sum += stage_ratio_loss.mean()  # [1]
+                # L = L_ar + \alpha * \sum_{stages} {L_ratio}
+                loss = ar_loss + (self.config.ratio_loss_weight * ratio_loss_sum)
 
         CausalLMOutput = namedtuple(
-            "CausalLMOutput", ["logits", "bpred_output", "inference_params"]
+            "CausalLMOutput",
+            [
+                "loss",
+                "logits",
+                "bpred_output",
+                "inference_params",
+                "ar_loss",
+                "ratio_loss",
+            ],
         )
         return CausalLMOutput(
+            loss=loss,
             logits=lm_logits,
             bpred_output=bpred_output,
             inference_params=inference_params,
+            ar_loss=ar_loss,
+            ratio_loss=ratio_loss_sum,
         )
 
     def step(self, input_ids, inference_params):
         B = input_ids.shape[0]
-        assert (
-            B == 1
-        ), "HNetForCausalLM step currently only supports batch size 1 -- need to handle different-size lengths for each sample"
+        assert B == 1, (
+            "HNetForCausalLM step currently only supports batch size 1 -- need to handle different-size lengths for each sample"
+        )
 
         hidden_states = self.embeddings(input_ids)
 

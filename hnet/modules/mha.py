@@ -30,9 +30,9 @@ class FlashCausalSelfAttention(nn.Module):
         window_size=(-1, -1),
     ):
         super().__init__()
-        assert (
-            flash_attn_varlen_qkvpacked_func is not None
-        ), "FlashAttention is not installed"
+        assert flash_attn_varlen_qkvpacked_func is not None, (
+            "FlashAttention is not installed"
+        )
         self.softmax_scale = softmax_scale
         self.window_size = window_size
 
@@ -57,7 +57,7 @@ class FlashCausalSelfAttention(nn.Module):
         if cu_seqlens is not None:
             assert cu_seqlens.dtype == torch.int32
             assert max_seqlen is not None
-            assert isinstance(max_seqlen, int)
+            assert isinstance(max_seqlen, int) or max_seqlen.dtype == torch.int32
             return flash_attn_varlen_qkvpacked_func(
                 qkv,
                 cu_seqlens,
@@ -91,9 +91,9 @@ class FlashCausalCrossAttention(nn.Module):
         window_size=(-1, -1),
     ):
         super().__init__()
-        assert (
-            flash_attn_varlen_kvpacked_func is not None
-        ), "FlashAttention is not installed"
+        assert flash_attn_varlen_kvpacked_func is not None, (
+            "FlashAttention is not installed"
+        )
         assert flash_attn_kvpacked_func is not None, "FlashAttention is not installed"
         self.softmax_scale = softmax_scale
         self.window_size = window_size
@@ -258,9 +258,9 @@ class CausalMHA(nn.Module):
 
     def _update_kv_cache(self, kv, inference_params):
         """kv: (batch_size, seqlen, 2, nheads, head_dim) or (batch_size, 1, 2, nheads, head_dim)"""
-        assert (
-            self.layer_idx is not None
-        ), "Generation requires layer_idx in the constructor"
+        assert self.layer_idx is not None, (
+            "Generation requires layer_idx in the constructor"
+        )
         return _update_kv_cache(kv, inference_params, self.layer_idx)
 
     def _apply_rotary_update_kvcache_attention(self, q, kv, inference_params):
@@ -333,7 +333,7 @@ class CausalMHA(nn.Module):
                 cache_seqlens=cache_seqlens,
                 softmax_scale=self.inner_cross_attn.softmax_scale,
                 causal=True,
-                window_size=(self.window_size, -1)
+                window_size=(self.window_size, -1),
             )
 
     def forward(
