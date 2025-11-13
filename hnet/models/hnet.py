@@ -13,6 +13,7 @@ from hnet.modules.dc import (
     DeChunkState,
 )
 from hnet.modules.utils import apply_optimization_params
+from hnet.modules.utils import FlopsCounter
 from omegaconf import OmegaConf
 
 from .config_hnet import HNetConfig
@@ -47,6 +48,7 @@ class HNet(nn.Module):
         self,
         config: HNetConfig,
         stage_idx: int,
+        flops_counter: FlopsCounter,
         device=None,
         dtype=None,
     ) -> None:
@@ -55,6 +57,7 @@ class HNet(nn.Module):
 
         self.stage_idx = stage_idx
         self.d_model = config.d_model[stage_idx]
+        self.flops_counter = flops_counter
 
         arch_layout = config.arch_layout
         for _ in range(stage_idx):
@@ -93,6 +96,7 @@ class HNet(nn.Module):
             _sub_model = SubModel(
                 config=config,
                 stage_idx=_stage_idx,
+                flops_counter=flops_counter,
                 **_pos_idx_dict,
                 **factory_kwargs,
             )
@@ -232,6 +236,7 @@ class HNet(nn.Module):
         max_seqlen=None,
         mask=None,
         inference_params=None,
+        num_tokens=None,
         **mixer_kwargs,
     ):
         assert mask is not None or (
@@ -254,16 +259,26 @@ class HNet(nn.Module):
             )
 
         if self.is_innermost:
+            # Inner most Network, no need to chunk/dechunk just run and exit early
             hidden_states = self.main_network(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
                 mask=mask,
                 inference_params=inference_params.main_network_state,
+                num_tokens=num_tokens,
                 **mixer_kwargs,
             )
             hidden_states = hidden_states[..., :D]
             return hidden_states, []
+
+        ##############################################################
+        # ---------------------H-Net Fwd -----------------------------#
+        ##############################################################
+
+        ##############################################################
+        # ---------------------H-Net Pre -----------------------------#
+        ##############################################################
 
         hidden_states = self.encoder(
             hidden_states,
@@ -271,6 +286,7 @@ class HNet(nn.Module):
             max_seqlen=max_seqlen,
             mask=mask,
             inference_params=inference_params.encoder_state,
+            num_tokens=num_tokens,
             **mixer_kwargs,
         )
 
@@ -286,8 +302,18 @@ class HNet(nn.Module):
             inference_params=inference_params.routing_module_state,
         )
         hidden_states, next_cu_seqlens, next_max_seqlen, next_mask = self.chunk_layer(
-            hidden_states, bpred_output.boundary_mask, cu_seqlens, mask=mask
+            hidden_states,
+            bpred_output.boundary_mask,
+            cu_seqlens,
+            mask=mask,
         )
+        next_num_tokens = bpred_output.boundary_mask.sum(
+            dim=-1
+        )  # [B], number of tokens per seq for next stage
+
+        ##############################################################
+        # ---------------------H-Net Main ---------------------------#
+        ##############################################################
 
         hidden_states, prev_boundary_predictions = self.main_network(
             hidden_states,
@@ -295,8 +321,13 @@ class HNet(nn.Module):
             max_seqlen=next_max_seqlen,
             mask=next_mask,
             inference_params=inference_params.main_network_state,
+            num_tokens=next_num_tokens,
             **mixer_kwargs,
         )
+
+        ##############################################################
+        # ---------------------H-Net Post ---------------------------#
+        ##############################################################
 
         hidden_states = self.dechunk_layer(
             hidden_states,
@@ -319,8 +350,27 @@ class HNet(nn.Module):
             max_seqlen=max_seqlen,
             mask=mask,
             inference_params=inference_params.decoder_state,
+            num_tokens=num_tokens,
             **mixer_kwargs,
         )
+
+        ##############################################################
+        # ---------------------H-Net FlOPs --------------------------#
+        ##############################################################
+        if self.flops_counter is not None:
+            # update FLOPs for the residual and router fwd passes
+            residual_proj_param_count = sum(
+                p.numel() for p in self.residual_proj.parameters()
+            )
+            router_param_count = sum(
+                p.numel() for p in self.routing_module.parameters()
+            )
+
+            self.flops_counter.add_flops(
+                2
+                * int(num_tokens.sum().item())
+                * (residual_proj_param_count + router_param_count)
+            )
 
         hidden_states = hidden_states[..., :D]
         return hidden_states, [bpred_output, *prev_boundary_predictions]

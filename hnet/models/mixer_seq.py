@@ -13,6 +13,7 @@ from .config_hnet import HNetConfig
 
 from hnet.modules.dc import RoutingModuleOutput
 from hnet.modules.utils import apply_optimization_params
+from hnet.modules.utils import FlopsCounter
 
 
 @dataclass
@@ -23,6 +24,7 @@ class CausalLMOutput:
     loss: torch.FloatTensor
     ar_loss: torch.FloatTensor
     ratio_loss: torch.FloatTensor
+    total_flops: float
 
 
 def cross_entropy(
@@ -78,6 +80,9 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
 
         super().__init__()
 
+        # Flop counter to estimate the FLOPs per forward pass
+        self.flops_counter = FlopsCounter()
+
         # We consider the HNet as a map (B, L, D[0]) -> (B, L, D[0])
         # Thus, the embedding is defined outside of the HNet.
         self.embeddings = nn.Embedding(vocab_size, d_embed, **factory_kwargs)
@@ -87,6 +92,8 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
             # We pass in the stage_idx as an HNet needs to know what
             # depth of the hierarchy it is in.
             stage_idx=0,
+            # Pass flops_counter so all inner stages can update
+            flops_counter=self.flops_counter,
             **factory_kwargs,
         )
         self.lm_head = nn.Linear(d_embed, vocab_size, bias=False, **factory_kwargs)
@@ -133,13 +140,21 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
         mask: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         inference_params: Optional[dict] = None,
-        num_last_tokens: Optional[int] = 0,
+        num_last_tokens: int = 0,
         **mixer_kwargs,
     ) -> CausalLMOutput:
         """
         num_last_tokens: if > 0, only return the logits for the last n tokens
         """
         hidden_states = self.embeddings(input_ids)
+
+        # Add FLOPs for embedding
+
+        if self.flops_counter is not None:
+            self.flops_counter.reset()  # Reset from prev fwd pass
+            # The embedding layer may have a projection in it too
+            embedding_params = sum(p.numel() for p in self.embeddings.parameters())
+            self.flops_counter.add_flops(2 * int(input_ids.numel()) * embedding_params)
 
         B, L, D = hidden_states.shape
 
@@ -159,12 +174,16 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
             cu_seqlens = None
             max_seqlen = None
 
+        num_tokens = torch.tensor(
+            [L] * B, device=hidden_states.device
+        )  # number of tokens for each seq in batch
         hidden_states, bpred_output = self.backbone(
             hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             mask=mask,
             inference_params=inference_params,
+            num_tokens=num_tokens,
             **mixer_kwargs,
         )
 
@@ -173,6 +192,17 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
         lm_logits = self.lm_head(hidden_states)
+
+        # Add the FLOPs for the LM head
+        if not isinstance(self.lm_head, nn.Identity):
+            self.flops_counter.add_flops(
+                2
+                * int(input_ids.numel())
+                * self.lm_head.in_features
+                * self.lm_head.out_features
+            )
+        total_flops = self.flops_counter.get_flops()
+
         loss = None
         ar_loss = None
         ratio_loss_sum = None
@@ -230,6 +260,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
                 "inference_params",
                 "ar_loss",
                 "ratio_loss",
+                "total_flops",
             ],
         )
         return CausalLMOutput(
@@ -239,6 +270,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
             inference_params=inference_params,
             ar_loss=ar_loss,
             ratio_loss=ratio_loss_sum,
+            total_flops=total_flops,
         )
 
     def step(self, input_ids, inference_params):

@@ -50,6 +50,7 @@ class Isotropic(nn.Module):
         stage_idx: int,
         device=None,
         dtype=None,
+        flops_counter=None,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -58,6 +59,7 @@ class Isotropic(nn.Module):
         self.d_model = config.d_model[self.stage_idx]
         self.ssm_cfg = get_stage_cfg(config.ssm_cfg, stage_idx)
         self.attn_cfg = get_stage_cfg(config.attn_cfg, stage_idx)
+        self.flops_counter = flops_counter
 
         arch_layout = config.arch_layout
         for _ in range(stage_idx):
@@ -82,6 +84,7 @@ class Isotropic(nn.Module):
                     ssm_cfg=self.ssm_cfg,
                     attn_cfg=self.attn_cfg,
                     layer_idx=(layer_idx + i),
+                    flops_counter=flops_counter,
                     **factory_kwargs,
                 )
                 for i in range(int(n_layer))
@@ -126,6 +129,7 @@ class Isotropic(nn.Module):
         max_seqlen=None,
         mask=None,
         inference_params=None,
+        num_tokens=None,
         **mixer_kwargs,
     ):
         assert (mask is not None) or (
@@ -136,9 +140,9 @@ class Isotropic(nn.Module):
         ssm_mixer_kwargs = copy.deepcopy(mixer_kwargs)
         if mask is not None:
             packed = False
-            assert (
-                hidden_states.dim() == 3
-            ), "Hidden states must be (B, L, D) in unpacked mode"
+            assert hidden_states.dim() == 3, (
+                "Hidden states must be (B, L, D) in unpacked mode"
+            )
         else:
             attn_mixer_kwargs.update(
                 {"cu_seqlens": cu_seqlens.int(), "max_seqlen": max_seqlen}
@@ -169,6 +173,7 @@ class Isotropic(nn.Module):
                 residual,
                 inference_params=inference_params,
                 mixer_kwargs=layer_mixer_kwargs,
+                num_tokens=num_tokens,
             )
 
         # Setting prenorm=False ignores the residual

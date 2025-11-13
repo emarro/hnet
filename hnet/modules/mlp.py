@@ -18,6 +18,8 @@ class SwiGLU(nn.Module):
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
+        self.d_model = d_model
+        self.d_intermediate = d_intermediate
         d_intermediate = (
             d_intermediate if d_intermediate is not None else int(8 * d_model / 3)
         )

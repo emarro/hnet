@@ -39,3 +39,18 @@ def apply_optimization_params(
         param._optim.update(kwargs)
     else:
         param._optim = kwargs
+
+
+class FlopsCounter:
+    def __init__(self):
+        self.reset()
+
+    def add_flops(self, flops: float):
+        self.flops_used += float(flops)
+        print(f"Adding {flops / 1e9:,} GFlops to counter")
+
+    def get_flops(self):
+        return self.flops_used
+
+    def reset(self):
+        self.flops_used = 0.0

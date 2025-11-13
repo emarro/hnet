@@ -203,6 +203,7 @@ class CausalMHA(nn.Module):
         rotary_emb_interleaved=False,
         device=None,
         dtype=None,
+        flops_counter=None,
     ) -> None:
         """
         return_residual: whether to return the input x along with the output. This is for
@@ -216,6 +217,7 @@ class CausalMHA(nn.Module):
         self.softmax_scale = softmax_scale
         self.rotary_emb_dim = rotary_emb_dim
         self.window_size = window_size
+        self.flops_counter = flops_counter
 
         self.num_heads = num_heads
         assert self.d_model % num_heads == 0, "d_model must be divisible by num_heads"
@@ -342,6 +344,7 @@ class CausalMHA(nn.Module):
         cu_seqlens=None,
         max_seqlen=None,
         inference_params=None,
+        num_tokens: torch.Tensor = None,
         **kwargs,
     ):
         """
@@ -401,6 +404,36 @@ class CausalMHA(nn.Module):
                 qkv[:, :, 0], qkv[:, :, 1:], inference_params
             )
         out = self.out_proj(rearrange(context, "... h d -> ... (h d)"))
+        if self.flops_counter is not None:
+            if self.window_size is not None and self.window_size != -1:
+                window_size = self.window_size + 1
+                num_tokens_attn = torch.clamp(num_tokens, max=window_size)
+            else:
+                num_tokens_attn = num_tokens
+            sum_l_squared = num_tokens_attn.square().sum().item()
+            # num_tokens = num_tokens_attn.sum().item()
+            expansion = self.num_heads * self.head_dim  # d_model again
+            qkv = (2 * 3 * num_tokens_attn * expansion**2).sum().item()
+            attn_logit = (
+                (2 * num_tokens_attn * num_tokens_attn * expansion).sum().item()
+            )
+            attn_score = (
+                (3 * self.num_heads * num_tokens_attn * num_tokens_attn).sum().item()
+            )
+            score_matmul_query = (
+                (2 * num_tokens_attn * num_tokens_attn * expansion).sum().item()
+            )
+            out_proj = (2 * num_tokens_attn * expansion * self.d_model).sum().item()
+            self.flops_counter.add_flops(
+                qkv + attn_logit + attn_score + score_matmul_query + out_proj
+            )
+            # self.flops_counter.add_flops(
+            #    4 * int(sum_l_squared) * (self.d_model * 1)
+            #    + 0
+            #    * (
+            #        2 * num_tokens.sum().item() * 4 * (self.d_model**2 + self.d_model)
+            #    )  # self.attn_cfg.expand)
+            # )
         return out
 
     def step(self, x, inference_params):
