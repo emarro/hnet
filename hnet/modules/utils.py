@@ -47,7 +47,6 @@ class FlopsCounter:
 
     def add_flops(self, flops: float):
         self.flops_used += float(flops)
-        print(f"Adding {flops / 1e9:,} GFlops to counter")
 
     def get_flops(self):
         return self.flops_used
