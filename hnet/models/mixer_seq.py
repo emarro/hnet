@@ -38,7 +38,9 @@ def cross_entropy(
     """
     logits = logits.view(-1, logits.shape[-1])  # [batch*seq_len, vocab_size]
     y = labels.view(-1)  # [batch*seq_len]
-    return F.cross_entropy(logits, y, ignore_index=pad_token_id)  # [1]
+    return F.cross_entropy(
+        logits, y, ignore_index=pad_token_id, reduction="none"
+    )  # [b * l]
 
 
 def weighted_cross_entropy(
@@ -62,7 +64,7 @@ def weighted_cross_entropy(
     loss_weights = loss_weights.view(-1)  # [batch*seq_len]
     loss_weights[y == pad_token_id] = 0.0
     # TODO: Follows GPN implementation, but should we remove weight normalization?
-    return (ce * (loss_weights / loss_weights.sum())).sum()  # [1]
+    return ce * (loss_weights / loss_weights.sum())  # .sum()  # [1]
 
 
 class HNetForCausalLM(nn.Module, GenerationMixin):
@@ -206,6 +208,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
         loss = None
         ar_loss = None
         ratio_loss_sum = None
+        unreduced_ar_loss = None
         if labels is not None:
             # Standard AR loss (or weighted version of ar loss)
             if loss_weights is not None:
@@ -215,12 +218,16 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
                     loss_weights=loss_weights,
                     pad_token_id=self.config.pad_token_id,
                 )
+                unreduced_ar_loss = ar_loss  # [B * L]
+                ar_loss = ar_loss.sum()
             else:
                 ar_loss = cross_entropy(
                     logits=lm_logits,
                     labels=labels,
                     pad_token_id=self.config.pad_token_id,
                 )
+                unreduced_ar_loss = ar_loss  # [B * L]
+                ar_loss = ar_loss.sum()
             loss = ar_loss
             # TODO: target_ratio should be a list (allow diff ratio per stage), currently fixed
             if target_ratio is not None:
@@ -255,6 +262,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
             "CausalLMOutput",
             [
                 "loss",
+                "unreduced_loss",
                 "logits",
                 "bpred_output",
                 "inference_params",
@@ -265,6 +273,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
         )
         return CausalLMOutput(
             loss=loss,
+            unreduced_loss=unreduced_ar_loss,
             logits=lm_logits,
             bpred_output=bpred_output,
             inference_params=inference_params,
