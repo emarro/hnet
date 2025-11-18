@@ -42,14 +42,15 @@ def apply_optimization_params(
 
 
 class FlopsCounter:
-    def __init__(self):
+    def __init__(self, device):
+        self.flops_used = torch.tensor(0.0, device=device)
         self.reset()
 
-    def add_flops(self, flops: float):
-        self.flops_used += float(flops)
+    def add_flops(self, flops: torch.FloatTensor):
+        self.flops_used += flops
 
     def get_flops(self):
         return self.flops_used
 
     def reset(self):
-        self.flops_used = 0.0
+        self.flops_used = self.flops_used * 0.0

@@ -24,7 +24,7 @@ class CausalLMOutput:
     loss: torch.FloatTensor
     ar_loss: torch.FloatTensor
     ratio_loss: torch.FloatTensor
-    total_flops: float
+    total_flops: torch.FloatTensor
 
 
 def cross_entropy(
@@ -83,7 +83,7 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
         super().__init__()
 
         # Flop counter to estimate the FLOPs per forward pass
-        self.flops_counter = FlopsCounter()
+        self.flops_counter = FlopsCounter(device)
 
         # We consider the HNet as a map (B, L, D[0]) -> (B, L, D[0])
         # Thus, the embedding is defined outside of the HNet.
