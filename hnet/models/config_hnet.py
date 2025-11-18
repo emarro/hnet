@@ -31,3 +31,4 @@ class HNetConfig(PretrainedConfig):
     pad_token_id: int = -100  # pad id for loss fn
     ratio_loss_weight: float = 0.03  # alpha in Hnet Paper
     use_return_dict: bool = False
+    log_bpreds: bool = True
